@@ -1,0 +1,64 @@
+require('dotenv').config();
+
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+
+const app = express();
+
+app.disable('x-powered-by');
+app.use(helmet());
+app.use(cors());
+app.use(express.json({ limit: '1mb' }));
+
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 200,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false
+}));
+
+app.get('/', (req, res) => {
+  res.json({
+    application: 'JJM FACEBOOK',
+    server: 'online',
+    version: '1.0.0',
+    message: 'Bienvenue sur le serveur JJM FACEBOOK'
+  });
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({
+    success: true,
+    server: 'JJM FACEBOOK',
+    status: 'healthy',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Route introuvable'
+  });
+});
+
+app.use((err, req, res, next) => {
+  console.error('Erreur serveur:', err.message);
+
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  res.status(500).json({
+    success: false,
+    message: 'Une erreur interne est survenue'
+  });
+});
+
+const port = Number(process.env.PORT) || 3000;
+
+app.listen(port, '0.0.0.0', () => {
+  console.log(`JJM FACEBOOK demarre sur le port ${port}`);
+});
