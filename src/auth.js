@@ -289,7 +289,7 @@ router.get('/me', databaseRequired, authenticate, async (req, res, next) => {
 });
 
 
-router.patch('/me', databaseRequired, authenticate, async (req, res, next) => {
+router.put('/me', databaseRequired, authenticate, async (req, res, next) => {
   try {
     let { first_name, last_name, username, bio } = req.body || {};
 
