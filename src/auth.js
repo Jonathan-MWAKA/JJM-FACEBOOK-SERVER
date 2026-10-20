@@ -288,4 +288,68 @@ router.get('/me', databaseRequired, authenticate, async (req, res, next) => {
   }
 });
 
+
+router.patch('/me', databaseRequired, authenticate, async (req, res, next) => {
+  try {
+    let { first_name, last_name, username, bio } = req.body || {};
+
+    first_name = typeof first_name === 'string' ? first_name.trim() : '';
+    last_name = typeof last_name === 'string' ? last_name.trim() : '';
+    username = typeof username === 'string'
+      ? username.trim().toLowerCase()
+      : '';
+    bio = typeof bio === 'string' ? bio.trim() : '';
+
+    if (
+      first_name.length < 1 ||
+      first_name.length > 80 ||
+      last_name.length < 1 ||
+      last_name.length > 80 ||
+      !/^[a-z0-9_]{3,30}$/.test(username) ||
+      bio.length > 500
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Vérifie le prénom, le nom, le nom utilisateur et la biographie (500 caractères maximum).'
+      });
+    }
+
+    const result = await req.db.query(
+      `UPDATE users
+       SET first_name = $1,
+           last_name = $2,
+           username = $3,
+           bio = $4,
+           updated_at = NOW()
+       WHERE id = $5
+       RETURNING id, username, first_name, last_name,
+                 email, phone, bio, profile_picture,
+                 cover_picture, created_at`,
+      [first_name, last_name, username, bio, req.auth.sub]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: 'Utilisateur introuvable.'
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Profil mis à jour avec succès.',
+      user: result.rows[0]
+    });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({
+        success: false,
+        message: 'Ce nom utilisateur est déjà utilisé.'
+      });
+    }
+
+    next(err);
+  }
+});
+
 module.exports = router;
