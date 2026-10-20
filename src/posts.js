@@ -57,7 +57,25 @@ router.get('/', databaseRequired, authenticate, async (req, res, next) => {
         u.username,
         u.first_name,
         u.last_name,
-        u.profile_picture
+        u.profile_picture,
+        (
+          SELECT COUNT(*)::int
+          FROM reactions r
+          WHERE r.post_id = p.id
+            AND r.reaction_type = 'like'
+        ) AS likes_count,
+        (
+          SELECT COUNT(*)::int
+          FROM comments c
+          WHERE c.post_id = p.id
+        ) AS comments_count,
+        EXISTS (
+          SELECT 1
+          FROM reactions r
+          WHERE r.post_id = p.id
+            AND r.user_id = $1
+            AND r.reaction_type = 'like'
+        ) AS liked_by_me
       FROM posts p
       JOIN users u ON u.id = p.user_id
       WHERE p.visibility = 'public'
