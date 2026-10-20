@@ -9,6 +9,7 @@ const { getPool } = require('./db');
 const { initializeDatabase } = require('./schema');
 const authRoutes = require('./auth');
 const postsRoutes = require('./posts');
+const socialRoutes = require('./social');
 
 const app = express();
 
@@ -63,6 +64,7 @@ app.get('/api/health', async (req, res) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/posts', postsRoutes);
+app.use('/api/social', socialRoutes);
 
 app.use((req, res) => {
   res.status(404).json({
