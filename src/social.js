@@ -1,6 +1,9 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { getPool } = require('./db');
+const cloudinary = require('cloudinary').v2;
+const multer = require('multer');
+
 
 const router = express.Router();
 
@@ -681,6 +684,147 @@ router.get('/stories', async (req, res) => {
         res.json({ success: true, stories: resultat.rows });
     } catch (e) {
         erreurServeur(res, e);
+    }
+});
+
+
+/* UPLOAD STORY : GALERIE ANDROID -> CLOUDINARY -> POSTGRESQL */
+const recevoirMediaStory = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+        fileSize: 25 * 1024 * 1024,
+        files: 1,
+        fields: 1,
+        fieldSize: 500 * 4
+    },
+    fileFilter: (req, file, cb) => {
+        const typesAutorises = new Set([
+            'image/jpeg',
+            'image/png',
+            'image/webp',
+            'image/gif',
+            'video/mp4',
+            'video/webm',
+            'video/quicktime'
+        ]);
+
+        if (!typesAutorises.has(file.mimetype)) {
+            return cb(new Error('FORMAT_MEDIA_NON_AUTORISE'));
+        }
+
+        cb(null, true);
+    }
+});
+
+function televerserVersCloudinary(fichier) {
+    return new Promise((resolve, reject) => {
+        const flux = cloudinary.uploader.upload_stream({
+            resource_type: 'auto',
+            folder: 'jjm-facebook/stories',
+            transformation: undefined
+        }, (erreur, resultat) => {
+            if (erreur) return reject(erreur);
+            if (!resultat || !resultat.secure_url) {
+                return reject(new Error('URL_CLOUDINARY_ABSENTE'));
+            }
+            resolve(resultat);
+        });
+
+        flux.end(fichier.buffer);
+    });
+}
+
+router.post('/stories/upload', (req, res, next) => {
+    recevoirMediaStory.single('media')(req, res, (erreur) => {
+        if (erreur) {
+            if (erreur instanceof multer.MulterError) {
+                const message = erreur.code === 'LIMIT_FILE_SIZE'
+                    ? 'Le média dépasse la limite de 25 Mo.'
+                    : 'Le fichier envoyé est invalide ou trop volumineux.';
+
+                return res.status(400).json({
+                    success: false,
+                    message
+                });
+            }
+
+            if (erreur.message === 'FORMAT_MEDIA_NON_AUTORISE') {
+                return res.status(415).json({
+                    success: false,
+                    message: 'Format accepté : JPEG, PNG, WEBP, GIF, MP4, WEBM ou MOV.'
+                });
+            }
+
+            return res.status(400).json({
+                success: false,
+                message: 'Impossible de recevoir ce fichier.'
+            });
+        }
+
+        next();
+    });
+}, async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({
+            success: false,
+            message: 'Sélectionne une photo ou une vidéo.'
+        });
+    }
+
+    const caption = String(req.body.caption || '').trim();
+
+    if (caption.length > 500) {
+        return res.status(400).json({
+            success: false,
+            message: 'La légende ne doit pas dépasser 500 caractères.'
+        });
+    }
+
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+    const apiKey = process.env.CLOUDINARY_API_KEY;
+    const apiSecret = process.env.CLOUDINARY_API_SECRET;
+
+    if (!cloudName || !apiKey || !apiSecret) {
+        return res.status(503).json({
+            success: false,
+            message: 'Le stockage des médias n’est pas configuré sur le serveur.'
+        });
+    }
+
+    cloudinary.config({
+        cloud_name: cloudName,
+        api_key: apiKey,
+        api_secret: apiSecret,
+        secure: true
+    });
+
+    try {
+        const media = await televerserVersCloudinary(req.file);
+
+        await assurerTableStories(req.db);
+
+        const resultat = await req.db.query(
+            `INSERT INTO stories (user_id, media_url, caption)
+             VALUES ($1, $2, $3)
+             RETURNING id, user_id, media_url, caption, created_at`,
+            [req.userId, media.secure_url, caption]
+        );
+
+        return res.status(201).json({
+            success: true,
+            message: 'Story publiée avec succès.',
+            story: {
+                ...resultat.rows[0],
+                media_type: media.resource_type
+            }
+        });
+    } catch (e) {
+        console.error('Erreur publication story Cloudinary:', e.message);
+
+        return res.status(502).json({
+            success: false,
+            message: 'Le téléversement ou l’enregistrement de la story a échoué.'
+        });
     }
 });
 
