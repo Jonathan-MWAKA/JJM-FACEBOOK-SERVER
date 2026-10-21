@@ -858,4 +858,156 @@ router.post('/stories', async (req, res) => {
     }
 });
 
+
+/* VUES DES STORIES : UNE VUE PAR UTILISATEUR ET PAR MEDIA */
+let storyViewsInitialisees = null;
+
+async function assurerTableVuesStories(db) {
+    if (!storyViewsInitialisees) {
+        storyViewsInitialisees = db.query(`
+            CREATE TABLE IF NOT EXISTS story_views (
+                id BIGSERIAL PRIMARY KEY,
+                story_id BIGINT NOT NULL REFERENCES stories(id)
+                    ON DELETE CASCADE,
+                viewer_id BIGINT NOT NULL REFERENCES users(id)
+                    ON DELETE CASCADE,
+                viewed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (story_id, viewer_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS story_views_story_idx
+                ON story_views (story_id, viewed_at DESC);
+        `).catch(e => {
+            storyViewsInitialisees = null;
+            throw e;
+        });
+    }
+
+    await storyViewsInitialisees;
+}
+
+/* ENREGISTRER UNE VUE */
+router.post('/stories/:id/view', async (req, res) => {
+    const storyId = Number(req.params.id);
+
+    if (!Number.isSafeInteger(storyId) || storyId <= 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Identifiant de story invalide.'
+        });
+    }
+
+    try {
+        await assurerTableStories(req.db);
+        await assurerTableVuesStories(req.db);
+
+        const storyResult = await req.db.query(
+            `SELECT id, user_id
+             FROM stories
+             WHERE id = $1
+               AND created_at > NOW() - INTERVAL '24 hours'`,
+            [storyId]
+        );
+
+        if (storyResult.rowCount === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Story introuvable ou expirée.'
+            });
+        }
+
+        const story = storyResult.rows[0];
+
+        if (Number(story.user_id) === req.userId) {
+            return res.json({
+                success: true,
+                recorded: false,
+                message: 'La vue de l’auteur n’est pas comptabilisée.'
+            });
+        }
+
+        const resultat = await req.db.query(
+            `INSERT INTO story_views (story_id, viewer_id)
+             VALUES ($1, $2)
+             ON CONFLICT (story_id, viewer_id) DO NOTHING
+             RETURNING id`,
+            [storyId, req.userId]
+        );
+
+        const compteur = await req.db.query(
+            `SELECT COUNT(*)::int AS views_count
+             FROM story_views
+             WHERE story_id = $1`,
+            [storyId]
+        );
+
+        return res.json({
+            success: true,
+            recorded: resultat.rowCount > 0,
+            views_count: compteur.rows[0].views_count
+        });
+    } catch (e) {
+        erreurServeur(res, e);
+    }
+});
+
+/* LISTE DES SPECTATEURS : AUTEUR UNIQUEMENT */
+router.get('/stories/:id/viewers', async (req, res) => {
+    const storyId = Number(req.params.id);
+
+    if (!Number.isSafeInteger(storyId) || storyId <= 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Identifiant de story invalide.'
+        });
+    }
+
+    try {
+        await assurerTableStories(req.db);
+        await assurerTableVuesStories(req.db);
+
+        const storyResult = await req.db.query(
+            `SELECT id, user_id
+             FROM stories
+             WHERE id = $1
+               AND created_at > NOW() - INTERVAL '24 hours'`,
+            [storyId]
+        );
+
+        if (storyResult.rowCount === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Story introuvable ou expirée.'
+            });
+        }
+
+        if (Number(storyResult.rows[0].user_id) !== req.userId) {
+            return res.status(403).json({
+                success: false,
+                message: 'Seul l’auteur peut consulter les spectateurs de cette story.'
+            });
+        }
+
+        const resultat = await req.db.query(
+            `SELECT v.viewer_id, v.viewed_at,
+                    u.username, u.first_name, u.last_name,
+                    u.profile_picture
+             FROM story_views v
+             JOIN users u ON u.id = v.viewer_id
+             WHERE v.story_id = $1
+             ORDER BY v.viewed_at DESC`,
+            [storyId]
+        );
+
+        return res.json({
+            success: true,
+            story_id: storyId,
+            views_count: resultat.rowCount,
+            viewers: resultat.rows
+        });
+    } catch (e) {
+        erreurServeur(res, e);
+    }
+});
+
 module.exports = router;
