@@ -334,8 +334,27 @@ router.post('/posts/:postId/reaction', async (req, res) => {
 
     try {
         const post = await req.db.query(
-            'SELECT id, user_id FROM posts WHERE id = $1',
-            [postId]
+            `SELECT p.id, p.user_id
+             FROM posts p
+             WHERE p.id = $1
+               AND (
+                 p.visibility = 'public'
+                 OR p.user_id = $2
+                 OR (
+                   p.visibility = 'friends'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM friendships f
+                     WHERE f.status = 'accepted'
+                       AND (
+                         (f.requester_id = p.user_id AND f.receiver_id = $2)
+                         OR
+                         (f.requester_id = $2 AND f.receiver_id = p.user_id)
+                       )
+                   )
+                 )
+               )`,
+            [postId, req.userId]
         );
 
         if (!post.rowCount) {
@@ -394,7 +413,23 @@ router.get('/posts/:postId/comments', async (req, res) => {
              JOIN users u ON u.id = c.user_id
              JOIN posts p ON p.id = c.post_id
              WHERE c.post_id = $1
-               AND (p.visibility = 'public' OR p.user_id = $2)
+               AND (
+                 p.visibility = 'public'
+                 OR p.user_id = $2
+                 OR (
+                   p.visibility = 'friends'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM friendships f
+                     WHERE f.status = 'accepted'
+                       AND (
+                         (f.requester_id = p.user_id AND f.receiver_id = $2)
+                         OR
+                         (f.requester_id = $2 AND f.receiver_id = p.user_id)
+                       )
+                   )
+                 )
+               )
              ORDER BY c.created_at ASC
              LIMIT 200`,
             [postId, req.userId]
@@ -421,9 +456,27 @@ router.post('/posts/:postId/comments', async (req, res) => {
 
     try {
         const post = await req.db.query(
-            `SELECT id, user_id FROM posts
-             WHERE id = $1 AND visibility = 'public'`,
-            [postId]
+            `SELECT p.id, p.user_id
+             FROM posts p
+             WHERE p.id = $1
+               AND (
+                 p.visibility = 'public'
+                 OR p.user_id = $2
+                 OR (
+                   p.visibility = 'friends'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM friendships f
+                     WHERE f.status = 'accepted'
+                       AND (
+                         (f.requester_id = p.user_id AND f.receiver_id = $2)
+                         OR
+                         (f.requester_id = $2 AND f.receiver_id = p.user_id)
+                       )
+                   )
+                 )
+               )`,
+            [postId, req.userId]
         );
 
         if (!post.rowCount) {
