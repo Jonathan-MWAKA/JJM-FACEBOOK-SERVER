@@ -1010,4 +1010,156 @@ router.get('/stories/:id/viewers', async (req, res) => {
     }
 });
 
+
+
+/* PHOTOS DE PROFIL ET DE COUVERTURE */
+const recevoirPhotoProfil = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+        fileSize: 10 * 1024 * 1024,
+        files: 1,
+        fields: 1
+    },
+    fileFilter: (req, file, cb) => {
+        const formats = new Set([
+            'image/jpeg',
+            'image/png',
+            'image/webp'
+        ]);
+
+        if (!formats.has(file.mimetype)) {
+            return cb(new Error('FORMAT_PHOTO_NON_AUTORISE'));
+        }
+
+        cb(null, true);
+    }
+});
+
+router.post('/profile-media', (req, res, next) => {
+    recevoirPhotoProfil.single('media')(req, res, (erreur) => {
+        if (erreur) {
+            if (erreur instanceof multer.MulterError) {
+                const message = erreur.code === 'LIMIT_FILE_SIZE'
+                    ? 'La photo ne doit pas dépasser 10 Mo.'
+                    : 'Le fichier envoyé est invalide ou trop volumineux.';
+
+                return res.status(400).json({
+                    success: false,
+                    message
+                });
+            }
+
+            if (erreur.message === 'FORMAT_PHOTO_NON_AUTORISE') {
+                return res.status(415).json({
+                    success: false,
+                    message: 'Formats acceptés : JPEG, PNG et WEBP.'
+                });
+            }
+
+            return res.status(400).json({
+                success: false,
+                message: 'Impossible de recevoir cette photo.'
+            });
+        }
+
+        next();
+    });
+}, async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({
+            success: false,
+            message: 'Sélectionne une photo.'
+        });
+    }
+
+    const kind = String(req.body.kind || '').trim();
+
+    if (kind !== 'profile' && kind !== 'cover') {
+        return res.status(400).json({
+            success: false,
+            message: 'Type de photo invalide.'
+        });
+    }
+
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+    const apiKey = process.env.CLOUDINARY_API_KEY;
+    const apiSecret = process.env.CLOUDINARY_API_SECRET;
+
+    if (!cloudName || !apiKey || !apiSecret) {
+        return res.status(503).json({
+            success: false,
+            message: 'Le stockage des photos n’est pas configuré.'
+        });
+    }
+
+    cloudinary.config({
+        cloud_name: cloudName,
+        api_key: apiKey,
+        api_secret: apiSecret,
+        secure: true
+    });
+
+    try {
+        const dossier = kind === 'profile'
+            ? 'jjm-facebook/profiles'
+            : 'jjm-facebook/covers';
+
+        const photo = await new Promise((resolve, reject) => {
+            const flux = cloudinary.uploader.upload_stream({
+                resource_type: 'image',
+                folder: dossier
+            }, (erreur, resultat) => {
+                if (erreur) return reject(erreur);
+
+                if (!resultat || !resultat.secure_url) {
+                    return reject(new Error('URL_CLOUDINARY_ABSENTE'));
+                }
+
+                resolve(resultat);
+            });
+
+            flux.end(req.file.buffer);
+        });
+
+        const colonne = kind === 'profile'
+            ? 'profile_picture'
+            : 'cover_picture';
+
+        const requeteSql = `
+            UPDATE users
+            SET ${colonne} = $1, updated_at = NOW()
+            WHERE id = $2
+            RETURNING id, username, first_name, last_name, bio,
+                      profile_picture, cover_picture
+        `;
+
+        const resultat = await req.db.query(
+            requeteSql,
+            [photo.secure_url, req.userId]
+        );
+
+        if (resultat.rowCount === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Utilisateur introuvable.'
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: kind === 'profile'
+                ? 'Photo de profil mise à jour.'
+                : 'Photo de couverture mise à jour.',
+            user: resultat.rows[0]
+        });
+    } catch (e) {
+        console.error('Erreur téléversement photo de profil:', e.message);
+
+        return res.status(502).json({
+            success: false,
+            message: 'Impossible d’enregistrer la photo pour le moment.'
+        });
+    }
+});
+
 module.exports = router;
