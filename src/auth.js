@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { getPool } = require('./db');
+const rateLimit = require('express-rate-limit');
 
 const router = express.Router();
 
@@ -351,5 +352,198 @@ router.put('/me', databaseRequired, authenticate, async (req, res, next) => {
     next(err);
   }
 });
+
+
+const crypto = require('crypto');
+
+const forgotPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false
+});
+
+router.post('/forgot-password', forgotPasswordLimiter, databaseRequired, async (req, res, next) => {
+  const email = typeof req.body?.email === 'string'
+    ? req.body.email.trim().toLowerCase()
+    : '';
+
+  if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ success: false, message: 'Adresse e-mail invalide.' });
+  }
+
+  try {
+    const result = await req.db.query(
+      'SELECT id, email FROM users WHERE LOWER(email) = $1 LIMIT 1',
+      [email]
+    );
+
+    const message = 'Si un compte correspond à cette adresse, un code sera envoyé.';
+
+    if (!result.rows.length) {
+      return res.json({ success: true, message });
+    }
+
+    if (!process.env.RESEND_API_KEY) {
+      console.error('RESEND_API_KEY absente de l’environnement serveur.');
+      return res.status(503).json({
+        success: false,
+        message: 'Le service d’envoi d’e-mails est temporairement indisponible.'
+      });
+    }
+
+    const user = result.rows[0];
+    const code = crypto.randomInt(0, 1000000).toString().padStart(6, '0');
+    const codeHash = crypto.createHash('sha256').update(code).digest('hex');
+
+    await req.db.query(
+      'DELETE FROM password_reset_codes WHERE user_id = $1',
+      [user.id]
+    );
+
+    await req.db.query(
+      `INSERT INTO password_reset_codes (user_id, code_hash, expires_at, attempts)
+       VALUES ($1, $2, NOW() + INTERVAL '10 minutes', 0)`,
+      [user.id, codeHash]
+    );
+
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + process.env.RESEND_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: process.env.RESEND_FROM || 'JJM FACEBOOK <onboarding@resend.dev>',
+        to: [user.email],
+        subject: 'Code de réinitialisation — JJM FACEBOOK',
+        text: 'Ton code est : ' + code +
+          '\nIl expire dans 10 minutes. Si tu n’as pas demandé ce code, ignore cet e-mail.'
+      })
+    });
+
+    if (!response.ok) {
+      console.error('Échec de l’envoi du code par Resend :', response.status);
+      await req.db.query(
+        'DELETE FROM password_reset_codes WHERE user_id = $1',
+        [user.id]
+      );
+      return res.status(503).json({
+        success: false,
+        message: 'Impossible d’envoyer le code pour le moment.'
+      });
+    }
+
+    return res.json({ success: true, message });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const resetPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false
+});
+
+router.post('/reset-password', resetPasswordLimiter, databaseRequired, async (req, res, next) => {
+  const email = typeof req.body?.email === 'string'
+    ? req.body.email.trim().toLowerCase()
+    : '';
+  const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
+  const password = typeof req.body?.new_password === 'string' ? req.body.new_password : '';
+
+  if (!email || !/^[0-9]{6}$/.test(code)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Adresse e-mail ou code invalide.'
+    });
+  }
+
+  if (password.length < 8 || password.length > 128) {
+    return res.status(400).json({
+      success: false,
+      message: 'Le mot de passe doit contenir entre 8 et 128 caractères.'
+    });
+  }
+
+  const codeHash = crypto.createHash('sha256').update(code).digest('hex');
+  const client = await req.db.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const result = await client.query(
+      `SELECT r.id AS reset_id, r.user_id, r.code_hash, r.expires_at, r.attempts
+       FROM password_reset_codes r
+       JOIN users u ON u.id = r.user_id
+       WHERE LOWER(u.email) = $1
+       ORDER BY r.created_at DESC
+       LIMIT 1
+       FOR UPDATE OF r`,
+      [email]
+    );
+
+    if (!result.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        message: 'Code invalide ou expiré.'
+      });
+    }
+
+    const reset = result.rows[0];
+
+    if (new Date(reset.expires_at).getTime() <= Date.now() || reset.attempts >= 5) {
+      await client.query(
+        'DELETE FROM password_reset_codes WHERE id = $1',
+        [reset.reset_id]
+      );
+      await client.query('COMMIT');
+      return res.status(400).json({
+        success: false,
+        message: 'Code invalide ou expiré. Demande un nouveau code.'
+      });
+    }
+
+    if (reset.code_hash !== codeHash) {
+      await client.query(
+        'UPDATE password_reset_codes SET attempts = attempts + 1 WHERE id = $1',
+        [reset.reset_id]
+      );
+      await client.query('COMMIT');
+      return res.status(400).json({
+        success: false,
+        message: 'Code invalide ou expiré.'
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    await client.query(
+      'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
+      [passwordHash, reset.user_id]
+    );
+
+    await client.query(
+      'DELETE FROM password_reset_codes WHERE user_id = $1',
+      [reset.user_id]
+    );
+
+    await client.query('COMMIT');
+
+    return res.json({
+      success: true,
+      message: 'Mot de passe réinitialisé avec succès. Tu peux te connecter.'
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
 
 module.exports = router;
