@@ -94,6 +94,12 @@ async function notifier(db, utilisateur, acteur, type, reference) {
              VALUES ($1, $2, $3, $4)`,
             [utilisateur, acteur, type, reference || null]
         );
+
+        notifierUtilisateur(utilisateur, 'notification:new', {
+            type,
+            reference_id: reference || null,
+            actor_id: acteur
+        });
     } catch (erreur) {
         console.error(
             'Échec de création de notification :',
