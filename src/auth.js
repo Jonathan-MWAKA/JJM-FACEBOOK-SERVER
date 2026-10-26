@@ -4,6 +4,17 @@ const jwt = require('jsonwebtoken');
 const { getPool } = require('./db');
 const rateLimit = require('express-rate-limit');
 
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Trop de tentatives de connexion. Réessaie dans 15 minutes.'
+  }
+});
+
 const router = express.Router();
 
 function getJwtSecret() {
@@ -161,13 +172,17 @@ router.post('/register', databaseRequired, async (req, res, next) => {
 
     const passwordHash = await bcrypt.hash(password, 12);
 
+    const accountCode =
+      'JJM-' + require('crypto').randomBytes(5).toString('hex').toUpperCase();
+
     const result = await req.db.query(
       `INSERT INTO users
-       (username, first_name, last_name, email, phone, password_hash)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, username, first_name, last_name, email,
+       (account_code, username, first_name, last_name, email, phone, password_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, account_code, username, first_name, last_name, email,
                  phone, bio, created_at`,
       [
+        accountCode,
         username,
         first_name,
         last_name,
@@ -190,7 +205,7 @@ router.post('/register', databaseRequired, async (req, res, next) => {
     if (err.code === '23505') {
       return res.status(409).json({
         success: false,
-        message: 'Ce nom utilisateur, email ou numero est deja utilise.'
+        message: 'Un conflit de donnees empeche la creation du compte. Reessayez.'
       });
     }
 
@@ -198,7 +213,7 @@ router.post('/register', databaseRequired, async (req, res, next) => {
   }
 });
 
-router.post('/login', databaseRequired, async (req, res, next) => {
+router.post('/login', loginLimiter, databaseRequired, async (req, res, next) => {
   try {
     const secret = getJwtSecret();
 
@@ -225,15 +240,36 @@ router.post('/login', databaseRequired, async (req, res, next) => {
     }
 
     const value = identifier.trim().toLowerCase();
+    const accountCode = identifier.trim().toUpperCase();
+    let result;
 
-    const result = await req.db.query(
-      `SELECT id, username, first_name, last_name, email,
-              phone, bio, password_hash, created_at
-       FROM users
-       WHERE username = $1 OR email = $1 OR phone = $2
-       LIMIT 1`,
-      [value, identifier.trim()]
-    );
+    if (/^JJM-[A-F0-9]{10}$/.test(accountCode)) {
+      result = await req.db.query(
+        `SELECT id, account_code, username, first_name, last_name,
+                email, phone, bio, password_hash, created_at
+         FROM users
+         WHERE account_code = $1`,
+        [accountCode]
+      );
+    } else {
+      result = await req.db.query(
+        `SELECT id, account_code, username, first_name, last_name,
+                email, phone, bio, password_hash, created_at
+         FROM users
+         WHERE LOWER(username) = $1
+            OR LOWER(email) = $1
+            OR phone = $2`,
+        [value, identifier.trim()]
+      );
+    }
+
+    if (result.rows.length > 1) {
+      return res.status(409).json({
+        success: false,
+        code: 'ACCOUNT_CODE_REQUIRED',
+        message: 'Plusieurs comptes correspondent. Connectez-vous avec votre code de compte JJM.'
+      });
+    }
 
     const user = result.rows[0];
 
@@ -363,22 +399,34 @@ const forgotPasswordLimiter = rateLimit({
   legacyHeaders: false
 });
 
+
 router.post('/forgot-password', forgotPasswordLimiter, databaseRequired, async (req, res, next) => {
+  const accountCode = typeof req.body?.account_code === 'string'
+    ? req.body.account_code.trim().toUpperCase()
+    : '';
   const email = typeof req.body?.email === 'string'
     ? req.body.email.trim().toLowerCase()
     : '';
 
-  if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ success: false, message: 'Adresse e-mail invalide.' });
+  if (!/^JJM-[A-F0-9]{10}$/.test(accountCode) ||
+      !email || email.length > 254 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Code de compte ou adresse e-mail invalide.'
+    });
   }
 
   try {
     const result = await req.db.query(
-      'SELECT id, email FROM users WHERE LOWER(email) = $1 LIMIT 1',
-      [email]
+      `SELECT id, account_code, email
+       FROM users
+       WHERE account_code = $1 AND LOWER(email) = $2
+       LIMIT 1`,
+      [accountCode, email]
     );
 
-    const message = 'Si un compte correspond à cette adresse, un code sera envoyé.';
+    const message = 'Si le code de compte et l’adresse correspondent, un code sera envoyé par e-mail.';
 
     if (!result.rows.length) {
       return res.json({ success: true, message });
@@ -448,16 +496,21 @@ const resetPasswordLimiter = rateLimit({
 });
 
 router.post('/reset-password', resetPasswordLimiter, databaseRequired, async (req, res, next) => {
+  const accountCode = typeof req.body?.account_code === 'string'
+    ? req.body.account_code.trim().toUpperCase()
+    : '';
   const email = typeof req.body?.email === 'string'
     ? req.body.email.trim().toLowerCase()
     : '';
   const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
   const password = typeof req.body?.new_password === 'string' ? req.body.new_password : '';
 
-  if (!email || !/^[0-9]{6}$/.test(code)) {
+  if (!/^JJM-[A-F0-9]{10}$/.test(accountCode) ||
+      !email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+      !/^[0-9]{6}$/.test(code)) {
     return res.status(400).json({
       success: false,
-      message: 'Adresse e-mail ou code invalide.'
+      message: 'Code de compte, adresse e-mail ou code de vérification invalide.'
     });
   }
 
@@ -478,18 +531,18 @@ router.post('/reset-password', resetPasswordLimiter, databaseRequired, async (re
       `SELECT r.id AS reset_id, r.user_id, r.code_hash, r.expires_at, r.attempts
        FROM password_reset_codes r
        JOIN users u ON u.id = r.user_id
-       WHERE LOWER(u.email) = $1
+       WHERE u.account_code = $1 AND LOWER(u.email) = $2
        ORDER BY r.created_at DESC
        LIMIT 1
        FOR UPDATE OF r`,
-      [email]
+      [accountCode, email]
     );
 
     if (!result.rows.length) {
       await client.query('ROLLBACK');
       return res.status(400).json({
         success: false,
-        message: 'Code invalide ou expiré.'
+        message: 'Code invalide ou expiré. Demande un nouveau code si nécessaire.'
       });
     }
 

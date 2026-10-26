@@ -1,6 +1,9 @@
 require('dotenv').config();
 
 const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const { initialiserSocketIO } = require('./realtime');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -12,6 +15,17 @@ const postsRoutes = require('./posts');
 const socialRoutes = require('./social');
 
 const app = express();
+
+const httpServer = http.createServer(app);
+
+const io = new Server(httpServer, {
+  cors: {
+    origin: process.env.CORS_ORIGIN || '*',
+    methods: ['GET', 'POST']
+  }
+});
+
+initialiserSocketIO(io);
 
 app.disable('x-powered-by');
 
@@ -88,7 +102,7 @@ app.use((err, req, res, next) => {
 
 const port = Number(process.env.PORT) || 3000;
 
-const server = app.listen(port, '0.0.0.0', () => {
+const server = httpServer.listen(port, '0.0.0.0', () => {
   console.log(`JJM FACEBOOK demarre sur le port ${port}`);
 
   initializeDatabase()

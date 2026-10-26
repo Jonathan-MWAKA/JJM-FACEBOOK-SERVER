@@ -13,11 +13,12 @@ async function initializeDatabase() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id BIGSERIAL PRIMARY KEY,
-      username VARCHAR(30) NOT NULL UNIQUE,
+      account_code VARCHAR(20) NOT NULL UNIQUE,
+      username VARCHAR(30) NOT NULL,
       first_name VARCHAR(80) NOT NULL,
       last_name VARCHAR(80) NOT NULL,
-      email VARCHAR(254) UNIQUE,
-      phone VARCHAR(25) UNIQUE,
+      email VARCHAR(254),
+      phone VARCHAR(25),
       password_hash TEXT NOT NULL,
       bio VARCHAR(500) NOT NULL DEFAULT '',
       profile_picture TEXT,
@@ -87,6 +88,20 @@ async function initializeDatabase() {
       CHECK (sender_id <> receiver_id),
       CHECK (length(trim(content)) > 0)
     );
+
+    -- Champs complémentaires pour les fonctions sociales.
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS message_type VARCHAR(20)
+      NOT NULL DEFAULT 'text';
+
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS media_url TEXT;
 
     CREATE TABLE IF NOT EXISTS notifications (
       id BIGSERIAL PRIMARY KEY,

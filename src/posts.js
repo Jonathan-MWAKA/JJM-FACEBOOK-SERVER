@@ -1,8 +1,144 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { getPool } = require('./db');
+const cloudinary = require('cloudinary').v2;
+const multer = require('multer');
+const { verifierMedia } = require('./verification-media');
 
 const router = express.Router();
+
+const recevoirMediaPublication = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 25 * 1024 * 1024,
+    files: 1,
+    fields: 0
+  },
+  fileFilter: (req, file, cb) => {
+    const typesAutorises = new Set([
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+      'image/gif',
+      'video/mp4',
+      'video/webm',
+      'video/quicktime'
+    ]);
+
+    if (!typesAutorises.has(file.mimetype)) {
+      return cb(new Error('FORMAT_MEDIA_NON_AUTORISE'));
+    }
+
+    cb(null, true);
+  }
+});
+
+function televerserMediaPublication(fichier) {
+  return new Promise((resolve, reject) => {
+    const flux = cloudinary.uploader.upload_stream({
+      resource_type: 'auto',
+      folder: 'jjm-facebook/publications'
+    }, (erreur, resultat) => {
+      if (erreur) return reject(erreur);
+
+      if (!resultat || !resultat.secure_url) {
+        return reject(new Error('URL_CLOUDINARY_ABSENTE'));
+      }
+
+      resolve(resultat);
+    });
+
+    flux.end(fichier.buffer);
+  });
+}
+
+// Téléverser une photo ou une vidéo pour une publication.
+router.post('/upload-media', authenticate, (req, res, next) => {
+  recevoirMediaPublication.single('media')(req, res, (erreur) => {
+    if (!erreur) return next();
+
+    if (erreur instanceof multer.MulterError) {
+      const message = erreur.code === 'LIMIT_FILE_SIZE'
+        ? 'Le média dépasse la limite de 25 Mo.'
+        : 'Le fichier envoyé est invalide ou trop volumineux.';
+
+      return res.status(400).json({
+        success: false,
+        message
+      });
+    }
+
+    if (erreur.message === 'FORMAT_MEDIA_NON_AUTORISE') {
+      return res.status(415).json({
+        success: false,
+        message: 'Formats acceptés : JPEG, PNG, WEBP, GIF, MP4, WEBM et MOV.'
+      });
+    }
+
+    return res.status(400).json({
+      success: false,
+      message: 'Impossible de recevoir ce fichier.'
+    });
+  });
+}, async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({
+      success: false,
+      message: 'Sélectionne une photo ou une vidéo.'
+    });
+  }
+
+  try {
+    const controle = await verifierMedia(
+      req.file.buffer,
+      req.file.mimetype,
+      'publication'
+    );
+
+    if (!controle.valide) {
+      return res.status(415).json({
+        success: false,
+        message: 'Le fichier est invalide ou son format réel ne correspond pas.'
+      });
+    }
+
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+    const apiKey = process.env.CLOUDINARY_API_KEY;
+    const apiSecret = process.env.CLOUDINARY_API_SECRET;
+
+    if (!cloudName || !apiKey || !apiSecret) {
+      return res.status(503).json({
+        success: false,
+        message: 'Le stockage des médias n’est pas configuré sur le serveur.'
+      });
+    }
+
+    cloudinary.config({
+      cloud_name: cloudName,
+      api_key: apiKey,
+      api_secret: apiSecret,
+      secure: true
+    });
+
+    const media = await televerserMediaPublication(req.file);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Média téléversé avec succès.',
+      media: {
+        url: media.secure_url,
+        type: media.resource_type
+      }
+    });
+  } catch (erreur) {
+    console.error('Erreur téléversement publication :', erreur.message);
+
+    return res.status(502).json({
+      success: false,
+      message: 'Le téléversement du média a échoué.'
+    });
+  }
+});
 
 function authenticate(req, res, next) {
   const header = req.headers.authorization || '';
@@ -35,6 +171,17 @@ function authenticate(req, res, next) {
       message: 'Session invalide ou expirée.'
     });
   }
+}
+
+function authenticateOptional(req, res, next) {
+  const header = req.headers.authorization || '';
+
+  if (!header.trim()) {
+    req.auth = { sub: null };
+    return next();
+  }
+
+  return authenticate(req, res, next);
 }
 
 function databaseRequired(req, res, next) {
@@ -77,7 +224,7 @@ const visibiliteValide = valeur =>
   ['public', 'friends', 'private'].includes(valeur);
 
 // Fil d'actualité : public, publications personnelles et amis acceptés.
-router.get('/', databaseRequired, authenticate, async (req, res, next) => {
+router.get('/', databaseRequired, authenticateOptional, async (req, res, next) => {
   try {
     const result = await req.db.query(`
       SELECT
@@ -145,12 +292,12 @@ router.get('/', databaseRequired, authenticate, async (req, res, next) => {
 router.post('/', databaseRequired, authenticate, async (req, res, next) => {
   try {
     const content = typeof req.body?.content === 'string'
-      ? req.body.content.trim()
+      ? req.body?.content.trim()
       : '';
 
     const visibility = req.body?.visibility === undefined
       ? 'public'
-      : req.body.visibility;
+      : req.body?.visibility;
 
     const mediaUrl = req.body?.media_url === undefined
       || req.body?.media_url === null
@@ -243,14 +390,14 @@ router.patch('/:postId', databaseRequired, authenticate, async (req, res, next) 
     let visibility = null;
 
     if (contentPresent) {
-      if (typeof req.body.content !== 'string') {
+      if (typeof req.body?.content !== 'string') {
         return res.status(400).json({
           success: false,
           message: 'Le texte doit être une chaîne de caractères.'
         });
       }
 
-      content = req.body.content.trim();
+      content = req.body?.content.trim();
 
       if (content.length > 5000) {
         return res.status(400).json({
@@ -261,7 +408,7 @@ router.patch('/:postId', databaseRequired, authenticate, async (req, res, next) 
     }
 
     if (visibilityPresent) {
-      visibility = req.body.visibility;
+      visibility = req.body?.visibility;
 
       if (!visibiliteValide(visibility)) {
         return res.status(400).json({

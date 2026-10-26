@@ -3,6 +3,8 @@ const jwt = require('jsonwebtoken');
 const { getPool } = require('./db');
 const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
+const { verifierMedia } = require('./verification-media');
+const { notifierUtilisateur } = require('./realtime');
 
 
 const router = express.Router();
@@ -86,11 +88,18 @@ function erreurServeur(res, erreur) {
 async function notifier(db, utilisateur, acteur, type, reference) {
     if (Number(utilisateur) === Number(acteur)) return;
 
-    await db.query(
-        `INSERT INTO notifications (user_id, actor_id, type, reference_id)
-         VALUES ($1, $2, $3, $4)`,
-        [utilisateur, acteur, type, reference || null]
-    );
+    try {
+        await db.query(
+            `INSERT INTO notifications (user_id, actor_id, type, reference_id)
+             VALUES ($1, $2, $3, $4)`,
+            [utilisateur, acteur, type, reference || null]
+        );
+    } catch (erreur) {
+        console.error(
+            'Échec de création de notification :',
+            erreur.message
+        );
+    }
 }
 
 /* RECHERCHE D'UTILISATEURS */
@@ -248,7 +257,7 @@ router.post('/friends/:userId', async (req, res) => {
 /* ACCEPTER OU REFUSER UNE DEMANDE */
 router.post('/friends/:userId/respond', async (req, res) => {
     const demandeur = Number(req.params.userId);
-    const action = String(req.body.action || '').toLowerCase();
+    const action = String(req.body?.action || '').toLowerCase();
 
     if (!Number.isSafeInteger(demandeur) ||
         !['accept', 'reject'].includes(action)) {
@@ -447,7 +456,7 @@ router.get('/posts/:postId/comments', async (req, res) => {
 /* AJOUTER UN COMMENTAIRE */
 router.post('/posts/:postId/comments', async (req, res) => {
     const postId = Number(req.params.postId);
-    const contenu = String(req.body.content || '').trim();
+    const contenu = String(req.body?.content || '').trim();
 
     if (!Number.isSafeInteger(postId) || postId <= 0 ||
         !contenu || contenu.length > 2000) {
@@ -568,20 +577,33 @@ router.get('/messages/:userId', async (req, res) => {
             });
         }
 
+        await req.db.query(
+            `UPDATE messages
+             SET delivered_at = COALESCE(delivered_at, NOW())
+             WHERE sender_id = $1
+               AND receiver_id = $2
+               AND delivered_at IS NULL`,
+            [cible, req.userId]
+        );
+
+        await req.db.query(
+            `UPDATE messages
+             SET read_at = NOW()
+             WHERE sender_id = $1
+               AND receiver_id = $2
+               AND read_at IS NULL`,
+            [cible, req.userId]
+        );
+
         const resultat = await req.db.query(
-            `SELECT id, sender_id, receiver_id, content, read_at, created_at
+            `SELECT id, sender_id, receiver_id, content,
+                    delivered_at, read_at, message_type, media_url, created_at
              FROM messages
              WHERE (sender_id = $1 AND receiver_id = $2)
                 OR (sender_id = $2 AND receiver_id = $1)
              ORDER BY created_at ASC
              LIMIT 300`,
             [req.userId, cible]
-        );
-
-        await req.db.query(
-            `UPDATE messages SET read_at = NOW()
-             WHERE sender_id = $1 AND receiver_id = $2 AND read_at IS NULL`,
-            [cible, req.userId]
         );
 
         res.json({ success: true, messages: resultat.rows });
@@ -592,7 +614,7 @@ router.get('/messages/:userId', async (req, res) => {
 
 router.post('/messages/:userId', async (req, res) => {
     const cible = Number(req.params.userId);
-    const contenu = String(req.body.content || '').trim();
+    const contenu = String(req.body?.content || '').trim();
 
     if (!Number.isSafeInteger(cible) || cible <= 0 ||
         cible === req.userId || !contenu || contenu.length > 4000) {
@@ -624,13 +646,19 @@ router.post('/messages/:userId', async (req, res) => {
         const resultat = await req.db.query(
             `INSERT INTO messages (sender_id, receiver_id, content)
              VALUES ($1, $2, $3)
-             RETURNING id, sender_id, receiver_id, content, read_at, created_at`,
+             RETURNING id, sender_id, receiver_id, content,
+                      delivered_at, read_at, message_type, media_url, created_at`,
             [req.userId, cible, contenu]
         );
 
+        const messageEnregistre = resultat.rows[0];
+
+        notifierUtilisateur(cible, 'message:new', messageEnregistre);
+        notifierUtilisateur(req.userId, 'message:new', messageEnregistre);
+
         await notifier(
             req.db, cible, req.userId,
-            'message', resultat.rows[0].id
+            'message', messageEnregistre.id
         );
 
         res.status(201).json({
@@ -771,7 +799,20 @@ router.post('/stories/upload', (req, res, next) => {
         });
     }
 
-    const caption = String(req.body.caption || '').trim();
+    const controleMedia = await verifierMedia(
+        req.file.buffer,
+        req.file.mimetype,
+        'story'
+    );
+
+    if (!controleMedia.valide) {
+        return res.status(415).json({
+            success: false,
+            message: 'Le fichier est invalide ou son contenu ne correspond pas au format annoncé.'
+        });
+    }
+
+    const caption = String(req.body?.caption || '').trim();
 
     if (caption.length > 500) {
         return res.status(400).json({
@@ -798,17 +839,39 @@ router.post('/stories/upload', (req, res, next) => {
         secure: true
     });
 
+    let media = null;
+
     try {
-        const media = await televerserVersCloudinary(req.file);
+        media = await televerserVersCloudinary(req.file);
 
-        await assurerTableStories(req.db);
+        let resultat;
 
-        const resultat = await req.db.query(
-            `INSERT INTO stories (user_id, media_url, caption)
-             VALUES ($1, $2, $3)
-             RETURNING id, user_id, media_url, caption, created_at`,
-            [req.userId, media.secure_url, caption]
-        );
+        try {
+            await assurerTableStories(req.db);
+
+            resultat = await req.db.query(
+                `INSERT INTO stories (user_id, media_url, caption)
+                 VALUES ($1, $2, $3)
+                 RETURNING id, user_id, media_url, caption, created_at`,
+                [req.userId, media.secure_url, caption]
+            );
+        } catch (erreurBase) {
+            if (media && media.public_id && media.resource_type) {
+                try {
+                    await cloudinary.uploader.destroy(media.public_id, {
+                        resource_type: media.resource_type
+                    });
+                    console.log('Média Cloudinary supprimé après échec de la base.');
+                } catch (erreurNettoyage) {
+                    console.error(
+                        'Échec du nettoyage Cloudinary :',
+                        erreurNettoyage.message
+                    );
+                }
+            }
+
+            throw erreurBase;
+        }
 
         return res.status(201).json({
             success: true,
@@ -828,34 +891,11 @@ router.post('/stories/upload', (req, res, next) => {
     }
 });
 
-router.post('/stories', async (req, res) => {
-    const mediaUrl = String(req.body.media_url || '').trim();
-    const caption = String(req.body.caption || '').trim();
-
-    if (!/^https:\/\/\S+$/i.test(mediaUrl) || caption.length > 500) {
-        return res.status(400).json({
-            success: false,
-            message: 'Il faut une URL HTTPS valide et une légende de 500 caractères maximum.'
-        });
-    }
-
-    try {
-        await assurerTableStories(req.db);
-
-        const resultat = await req.db.query(
-            `INSERT INTO stories (user_id, media_url, caption)
-             VALUES ($1, $2, $3)
-             RETURNING id, user_id, media_url, caption, created_at`,
-            [req.userId, mediaUrl, caption]
-        );
-
-        res.status(201).json({
-            success: true,
-            story: resultat.rows[0]
-        });
-    } catch (e) {
-        erreurServeur(res, e);
-    }
+router.post('/stories', (req, res) => {
+    return res.status(410).json({
+        success: false,
+        message: 'Cette méthode de publication n’est plus disponible. Utilise le téléversement de média.'
+    });
 });
 
 
@@ -1072,7 +1112,20 @@ router.post('/profile-media', (req, res, next) => {
         });
     }
 
-    const kind = String(req.body.kind || '').trim();
+    const controleMedia = await verifierMedia(
+        req.file.buffer,
+        req.file.mimetype,
+        'profil'
+    );
+
+    if (!controleMedia.valide) {
+        return res.status(415).json({
+            success: false,
+            message: 'La photo est invalide ou son contenu ne correspond pas au format annoncé.'
+        });
+    }
+
+    const kind = String(req.body?.kind || '').trim();
 
     if (kind !== 'profile' && kind !== 'cover') {
         return res.status(400).json({
@@ -1099,12 +1152,14 @@ router.post('/profile-media', (req, res, next) => {
         secure: true
     });
 
+    let photoTeleversee = null;
+
     try {
         const dossier = kind === 'profile'
             ? 'jjm-facebook/profiles'
             : 'jjm-facebook/covers';
 
-        const photo = await new Promise((resolve, reject) => {
+        photoTeleversee = await new Promise((resolve, reject) => {
             const flux = cloudinary.uploader.upload_stream({
                 resource_type: 'image',
                 folder: dossier
@@ -1135,10 +1190,24 @@ router.post('/profile-media', (req, res, next) => {
 
         const resultat = await req.db.query(
             requeteSql,
-            [photo.secure_url, req.userId]
+            [photoTeleversee.secure_url, req.userId]
         );
 
         if (resultat.rowCount === 0) {
+            if (photoTeleversee && photoTeleversee.public_id) {
+                try {
+                    await cloudinary.uploader.destroy(
+                        photoTeleversee.public_id,
+                        { resource_type: 'image' }
+                    );
+                } catch (erreurNettoyage) {
+                    console.error(
+                        'Échec du nettoyage Cloudinary :',
+                        erreurNettoyage.message
+                    );
+                }
+            }
+
             return res.status(404).json({
                 success: false,
                 message: 'Utilisateur introuvable.'
@@ -1155,6 +1224,9 @@ router.post('/profile-media', (req, res, next) => {
     } catch (e) {
         console.error('Erreur téléversement photo de profil:', e.message);
 
+        // En cas d'erreur SQL, le résultat de la mise à jour peut être ambigu.
+        // On conserve donc le média pour éviter de supprimer une photo
+        // que PostgreSQL aurait déjà enregistrée.
         return res.status(502).json({
             success: false,
             message: 'Impossible d’enregistrer la photo pour le moment.'
