@@ -103,6 +103,16 @@ async function initializeDatabase() {
     ALTER TABLE messages
       ADD COLUMN IF NOT EXISTS media_url TEXT;
 
+    CREATE TABLE IF NOT EXISTS fcm_tokens (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token TEXT NOT NULL UNIQUE,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_fcm_tokens_user
+      ON fcm_tokens(user_id);
+
     CREATE TABLE IF NOT EXISTS notifications (
       id BIGSERIAL PRIMARY KEY,
       user_id BIGINT NOT NULL REFERENCES users(id)

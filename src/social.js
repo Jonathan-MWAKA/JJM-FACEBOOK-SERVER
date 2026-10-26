@@ -5,6 +5,7 @@ const cloudinary = require('cloudinary').v2;
 const multer = require('multer');
 const { verifierMedia } = require('./verification-media');
 const { notifierUtilisateur } = require('./realtime');
+const { envoyerNotificationUtilisateur } = require('./push');
 
 
 const router = express.Router();
@@ -76,6 +77,36 @@ function baseDeDonnees(req, res, next) {
 
 router.use(authentifier, baseDeDonnees);
 
+
+router.post('/fcm-token', async (req, res) => {
+    try {
+        const token = String((req.body || {}).token || '').trim();
+
+        if (!token || token.length > 4096) {
+            return res.status(400).json({
+                success: false,
+                message: 'Jeton Firebase invalide.'
+            });
+        }
+
+        await req.db.query(
+            `INSERT INTO fcm_tokens (user_id, token, updated_at)
+             VALUES ($1, $2, NOW())
+             ON CONFLICT (token)
+             DO UPDATE SET user_id = EXCLUDED.user_id,
+                           updated_at = NOW()`,
+            [req.userId, token]
+        );
+
+        return res.json({
+            success: true,
+            message: 'Jeton Firebase enregistré.'
+        });
+    } catch (erreur) {
+        return erreurServeur(res, erreur);
+    }
+});
+
 function erreurServeur(res, erreur) {
     console.error('Erreur JJM FACEBOOK SOCIAL:', erreur.message);
 
@@ -99,6 +130,16 @@ async function notifier(db, utilisateur, acteur, type, reference) {
             type,
             reference_id: reference || null,
             actor_id: acteur
+        });
+
+        await envoyerNotificationUtilisateur(db, utilisateur, {
+            type,
+            title: type === 'message' ? 'Nouveau message' : 'JJM FACEBOOK',
+            body: type === 'message'
+                ? 'Tu as reçu un nouveau message.'
+                : 'Tu as une nouvelle notification.',
+            actor_id: acteur,
+            reference_id: reference || null
         });
     } catch (erreur) {
         console.error(
