@@ -717,6 +717,182 @@ router.post('/messages/:userId', async (req, res) => {
     }
 });
 
+
+/* NOTES VOCALES : ANDROID -> CLOUDINARY -> MESSAGES */
+const recevoirNoteVocale = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+        fileSize: 10 * 1024 * 1024,
+        files: 1,
+        fields: 0
+    },
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype !== 'audio/mp4') {
+            return cb(new Error('FORMAT_NOTE_VOCALE_NON_AUTORISE'));
+        }
+        cb(null, true);
+    }
+});
+
+router.post('/messages/:userId/audio', (req, res) => {
+    recevoirNoteVocale.single('audio')(req, res, async (erreurUpload) => {
+        if (erreurUpload) {
+            const limite = erreurUpload instanceof multer.MulterError
+                && erreurUpload.code === 'LIMIT_FILE_SIZE';
+
+            return res.status(400).json({
+                success: false,
+                message: limite
+                    ? 'La note vocale dépasse la limite de 10 Mo.'
+                    : 'Fichier audio invalide ou format non autorisé.'
+            });
+        }
+
+        const cible = Number(req.params.userId);
+        const fichier = req.file;
+
+        if (!Number.isSafeInteger(cible) || cible <= 0 ||
+            cible === Number(req.userId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Destinataire invalide.'
+            });
+        }
+
+        if (!fichier || !Buffer.isBuffer(fichier.buffer) ||
+            fichier.buffer.length < 12 ||
+            fichier.buffer.toString('ascii', 4, 8) !== 'ftyp') {
+            return res.status(415).json({
+                success: false,
+                message: 'Le fichier audio MP4 est invalide.'
+            });
+        }
+
+        const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+        const apiKey = process.env.CLOUDINARY_API_KEY;
+        const apiSecret = process.env.CLOUDINARY_API_SECRET;
+
+        if (!cloudName || !apiKey || !apiSecret) {
+            return res.status(503).json({
+                success: false,
+                message: 'Le stockage audio n’est pas configuré.'
+            });
+        }
+
+        let media = null;
+
+        try {
+            const ami = await req.db.query(
+                `SELECT id FROM friendships
+                 WHERE status = 'accepted'
+                   AND (
+                     (requester_id = $1 AND receiver_id = $2)
+                     OR (requester_id = $2 AND receiver_id = $1)
+                   )`,
+                [req.userId, cible]
+            );
+
+            if (!ami.rowCount) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Vous devez être amis pour échanger des messages.'
+                });
+            }
+
+            cloudinary.config({
+                cloud_name: cloudName,
+                api_key: apiKey,
+                api_secret: apiSecret,
+                secure: true
+            });
+
+            media = await new Promise((resolve, reject) => {
+                const flux = cloudinary.uploader.upload_stream({
+                    resource_type: 'video',
+                    folder: 'jjm-facebook/voice-notes'
+                }, (err, resultat) => {
+                    if (err) return reject(err);
+                    if (!resultat || !resultat.secure_url) {
+                        return reject(new Error('URL_CLOUDINARY_ABSENTE'));
+                    }
+                    resolve(resultat);
+                });
+
+                flux.end(fichier.buffer);
+            });
+
+            let resultat;
+
+            try {
+                resultat = await req.db.query(
+                    `INSERT INTO messages
+                     (sender_id, receiver_id, content, message_type, media_url)
+                     VALUES ($1, $2, $3, $4, $5)
+                     RETURNING id, sender_id, receiver_id, content,
+                               delivered_at, read_at, message_type,
+                               media_url, created_at`,
+                    [
+                        req.userId,
+                        cible,
+                        '🎙️ Note vocale',
+                        'audio',
+                        media.secure_url
+                    ]
+                );
+            } catch (erreurBase) {
+                if (media.public_id) {
+                    try {
+                        await cloudinary.uploader.destroy(media.public_id, {
+                            resource_type: media.resource_type || 'video'
+                        });
+                    } catch (erreurNettoyage) {
+                        console.error(
+                            'Nettoyage audio Cloudinary impossible:',
+                            erreurNettoyage.message
+                        );
+                    }
+                }
+                throw erreurBase;
+            }
+
+            const messageEnregistre = resultat.rows[0];
+
+            notifierUtilisateur(cible, 'message:new', messageEnregistre);
+            notifierUtilisateur(req.userId, 'message:new', messageEnregistre);
+
+            await notifier(
+                req.db,
+                cible,
+                req.userId,
+                'message',
+                messageEnregistre.id
+            );
+
+            return res.status(201).json({
+                success: true,
+                message: messageEnregistre
+            });
+        } catch (e) {
+            console.error('Erreur note vocale:', e.message);
+
+            if (media && media.public_id) {
+                try {
+                    await cloudinary.uploader.destroy(media.public_id, {
+                        resource_type: media.resource_type || 'video'
+                    });
+                } catch (erreurNettoyage) {
+                    console.error(
+                        'Nettoyage audio Cloudinary impossible:',
+                        erreurNettoyage.message
+                    );
+                }
+            }
+
+            return erreurServeur(res, e);
+        }
+    });
+});
+
 /* STORIES : EXPIRATION APRÈS 24 HEURES */
 let storiesInitialisees = null;
 
