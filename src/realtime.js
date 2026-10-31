@@ -3,6 +3,8 @@ const { getPool } = require('./db');
 
 let ioInstance = null;
 const appelsActifs = new Map();
+const deconnexionsEnAttente = new Map();
+const DELAI_GRACE_APPEL = 25000;
 
 function identifiantValide(value) {
     const id = Number(value);
@@ -70,6 +72,14 @@ function initialiserSocketIO(io) {
     io.on('connection', (socket) => {
         const userId = socket.data.userId;
         socket.join(`user:${userId}`);
+
+        // Une reconnexion dans le délai de grâce annule la fin d'appel.
+        const deconnexionPrecedente = deconnexionsEnAttente.get(userId);
+        if (deconnexionPrecedente) {
+            clearTimeout(deconnexionPrecedente);
+            deconnexionsEnAttente.delete(userId);
+            console.log(`Socket JJM reconnecté : utilisateur ${userId}`);
+        }
 
         socket.emit('realtime:ready', {
             success: true,
@@ -250,26 +260,60 @@ function initialiserSocketIO(io) {
         });
 
         socket.on('disconnect', (reason) => {
-            for (const [callId, appel] of appelsActifs.entries()) {
-                if (
-                    appel.callerId === userId ||
-                    appel.receiverId === userId
-                ) {
-                    appelsActifs.delete(callId);
-                    const cible = appel.callerId === userId
-                        ? appel.receiverId
-                        : appel.callerId;
+            const salleUtilisateur =
+                io.sockets.adapter.rooms.get(`user:${userId}`);
 
-                    io.to(`user:${cible}`).emit('call:end', {
-                        callId,
-                        fromUserId: userId,
-                        reason: 'disconnected'
-                    });
-                }
+            if (salleUtilisateur && salleUtilisateur.size > 0) {
+                console.log(
+                    `Socket déconnecté, autre connexion active : utilisateur ${userId}`
+                );
+                return;
             }
 
+            const ancienDelai = deconnexionsEnAttente.get(userId);
+            if (ancienDelai) {
+                clearTimeout(ancienDelai);
+            }
+
+            const temporisateur = setTimeout(() => {
+                if (deconnexionsEnAttente.get(userId) !== temporisateur) {
+                    return;
+                }
+
+                deconnexionsEnAttente.delete(userId);
+
+                const salle = io.sockets.adapter.rooms.get(`user:${userId}`);
+                if (salle && salle.size > 0) return;
+
+                for (const [callId, appel] of appelsActifs.entries()) {
+                    if (
+                        appel.callerId === userId ||
+                        appel.receiverId === userId
+                    ) {
+                        appelsActifs.delete(callId);
+
+                        const cible = appel.callerId === userId
+                            ? appel.receiverId
+                            : appel.callerId;
+
+                        io.to(`user:${cible}`).emit('call:end', {
+                            callId,
+                            fromUserId: userId,
+                            reason: 'disconnected'
+                        });
+                    }
+                }
+
+                console.log(
+                    `Appels terminés après délai de grâce : utilisateur ${userId}`
+                );
+            }, DELAI_GRACE_APPEL);
+
+            deconnexionsEnAttente.set(userId, temporisateur);
+
             console.log(
-                `Socket JJM déconnecté : utilisateur ${userId} (${reason})`
+                `Socket déconnecté : utilisateur ${userId} (${reason}). `
+                + `Délai : ${DELAI_GRACE_APPEL / 1000}s.`
             );
         });
     });
