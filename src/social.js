@@ -77,6 +77,102 @@ function baseDeDonnees(req, res, next) {
 
 router.use(authentifier, baseDeDonnees);
 
+/* PROFIL PUBLIC D'UN MEMBRE */
+router.get('/users/:userId', async (req, res) => {
+    const cible = Number(req.params.userId);
+
+    if (!Number.isSafeInteger(cible) || cible <= 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Identifiant utilisateur invalide.'
+        });
+    }
+
+    try {
+        const resultat = await req.db.query(
+            `SELECT
+                u.id,
+                u.username,
+                u.first_name,
+                u.last_name,
+                u.bio,
+                u.profile_picture,
+                u.cover_picture,
+                u.account_code,
+                u.created_at,
+                CASE
+                    WHEN u.id = $2 THEN 'self'
+                    WHEN EXISTS (
+                        SELECT 1 FROM friendships f
+                        WHERE f.status = 'accepted'
+                          AND (
+                            (f.requester_id = $2 AND f.receiver_id = u.id)
+                            OR
+                            (f.requester_id = u.id AND f.receiver_id = $2)
+                          )
+                    ) THEN 'friends'
+                    WHEN EXISTS (
+                        SELECT 1 FROM friendships f
+                        WHERE f.status = 'pending'
+                          AND f.requester_id = $2
+                          AND f.receiver_id = u.id
+                    ) THEN 'sent'
+                    WHEN EXISTS (
+                        SELECT 1 FROM friendships f
+                        WHERE f.status = 'pending'
+                          AND f.requester_id = u.id
+                          AND f.receiver_id = $2
+                    ) THEN 'received'
+                    ELSE 'none'
+                END AS friendship_status,
+                (
+                    SELECT COUNT(*)
+                    FROM friendships f
+                    WHERE f.status = 'accepted'
+                      AND (f.requester_id = u.id OR f.receiver_id = u.id)
+                ) AS friends_count
+             FROM users u
+             WHERE u.id = $1`,
+            [cible, req.userId]
+        );
+
+        if (!resultat.rows.length) {
+            return res.status(404).json({
+                success: false,
+                message: 'Utilisateur introuvable.'
+            });
+        }
+
+        const amis = await req.db.query(
+            `SELECT u.id, u.username, u.first_name,
+                    u.last_name, u.profile_picture
+             FROM friendships f
+             JOIN users u ON u.id =
+                CASE WHEN f.requester_id = $1
+                     THEN f.receiver_id ELSE f.requester_id END
+             WHERE (f.requester_id = $1 OR f.receiver_id = $1)
+               AND f.status = 'accepted'
+             ORDER BY f.created_at DESC
+             LIMIT 6`,
+            [cible]
+        );
+
+        return res.json({
+            success: true,
+            user: resultat.rows[0],
+            friends: amis.rows
+        });
+    } catch (e) {
+        console.error('Erreur profil membre :', e.message);
+        return res.status(500).json({
+            success: false,
+            message: 'Impossible de charger ce profil.'
+        });
+    }
+});
+// PROFIL_MEMBRE_COMPLET_JJM_V1
+
+
 
 router.post('/fcm-token', async (req, res) => {
     try {
