@@ -5,13 +5,13 @@ const { getPool } = require('./db');
 const rateLimit = require('express-rate-limit');
 
 const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
+  windowMs: 15 * 1000,
   limit: 10,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   message: {
     success: false,
-    message: 'Trop de tentatives de connexion. Réessaie dans 15 minutes.'
+    message: 'Trop de tentatives de connexion. Réessaie dans 15 secondes.'
   }
 });
 
@@ -99,76 +99,90 @@ router.post('/register', databaseRequired, async (req, res, next) => {
     }
 
     let {
-      username,
       first_name,
       last_name,
-      email,
-      phone,
+      contact,
+      date_of_birth,
+      gender,
       password
     } = req.body || {};
 
-    username = typeof username === 'string'
-      ? username.trim().toLowerCase()
+    first_name = typeof first_name === 'string' ? first_name.trim() : '';
+    last_name = typeof last_name === 'string' ? last_name.trim() : '';
+    contact = typeof contact === 'string' ? contact.trim() : '';
+    date_of_birth = typeof date_of_birth === 'string'
+      ? date_of_birth.trim()
       : '';
+    gender = typeof gender === 'string' ? gender.trim() : '';
 
-    first_name = typeof first_name === 'string'
-      ? first_name.trim()
-      : '';
-
-    last_name = typeof last_name === 'string'
-      ? last_name.trim()
-      : '';
-
-    email = typeof email === 'string'
-      ? email.trim().toLowerCase() || null
-      : null;
-
-    phone = typeof phone === 'string'
-      ? phone.trim() || null
-      : null;
+    const email = contact.includes('@') ? contact.toLowerCase() : null;
+    const phone = email ? null : (contact || null);
 
     if (
-      !/^[a-z0-9_]{3,30}$/.test(username) ||
-      first_name.length < 1 ||
-      first_name.length > 80 ||
-      last_name.length < 1 ||
-      last_name.length > 80 ||
+      first_name.length < 1 || first_name.length > 80 ||
+      last_name.length < 1 || last_name.length > 80 ||
       typeof password !== 'string' ||
       password.length < 8 ||
       Buffer.byteLength(password, 'utf8') > 72
     ) {
       return res.status(400).json({
         success: false,
-        message: 'Informations invalides. Verifiez le nom utilisateur, le nom, le prenom et le mot de passe (8 caracteres minimum).'
+        message: 'Vérifiez vos noms et votre mot de passe (8 caractères minimum).'
       });
     }
 
-    if (!email && !phone) {
+    if (!contact) {
       return res.status(400).json({
         success: false,
-        message: 'Un email ou un numero de telephone est requis.'
+        message: 'Ajoutez votre numéro de téléphone ou votre adresse e-mail.'
       });
     }
 
     if (
       email &&
-      (
-        email.length > 254 ||
-        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
-      )
+      (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
     ) {
       return res.status(400).json({
         success: false,
-        message: 'Adresse email invalide.'
+        message: 'Adresse e-mail invalide.'
       });
     }
 
     if (phone && !/^\+?[0-9 ()-]{7,25}$/.test(phone)) {
       return res.status(400).json({
         success: false,
-        message: 'Numero de telephone invalide.'
+        message: 'Numéro de téléphone invalide.'
       });
     }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date_of_birth)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Date de naissance invalide.'
+      });
+    }
+
+    const dateTest = new Date(date_of_birth + 'T00:00:00Z');
+    if (
+      Number.isNaN(dateTest.getTime()) ||
+      dateTest.toISOString().slice(0, 10) !== date_of_birth ||
+      dateTest > new Date()
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Vérifiez votre date de naissance.'
+      });
+    }
+
+    if (!['Femme', 'Homme'].includes(gender)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Sélectionnez Femme ou Homme.'
+      });
+    }
+
+    const username = 'jjm_' +
+      require('crypto').randomBytes(8).toString('hex');
 
     const passwordHash = await bcrypt.hash(password, 12);
 
@@ -177,10 +191,11 @@ router.post('/register', databaseRequired, async (req, res, next) => {
 
     const result = await req.db.query(
       `INSERT INTO users
-       (account_code, username, first_name, last_name, email, phone, password_hash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (account_code, username, first_name, last_name, email, phone,
+        date_of_birth, gender, password_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id, account_code, username, first_name, last_name, email,
-                 phone, bio, created_at`,
+                 phone, date_of_birth, gender, bio, created_at`,
       [
         accountCode,
         username,
@@ -188,6 +203,8 @@ router.post('/register', databaseRequired, async (req, res, next) => {
         last_name,
         email,
         phone,
+        date_of_birth,
+        gender,
         passwordHash
       ]
     );
@@ -239,35 +256,50 @@ router.post('/login', loginLimiter, databaseRequired, async (req, res, next) => 
       });
     }
 
-    const value = identifier.trim().toLowerCase();
-    const accountCode = identifier.trim().toUpperCase();
+    const contact = identifier.trim();
+    const value = contact.toLowerCase();
+
+    const emailValide =
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+
+    const chiffresTelephone = contact.replace(/\D/g, '');
+
+    const telephoneValide =
+      /^\+?[0-9 ()-]{7,25}$/.test(contact) &&
+      chiffresTelephone.length >= 7 &&
+      chiffresTelephone.length <= 20;
+
+    if (!emailValide && !telephoneValide) {
+      return res.status(400).json({
+        success: false,
+        message: 'Utilisez uniquement une adresse e-mail ou un numéro de téléphone valide.'
+      });
+    }
+
     let result;
 
-    if (/^JJM-[A-F0-9]{10}$/.test(accountCode)) {
+    if (emailValide) {
       result = await req.db.query(
         `SELECT id, account_code, username, first_name, last_name,
                 email, phone, bio, password_hash, created_at
          FROM users
-         WHERE account_code = $1`,
-        [accountCode]
+         WHERE LOWER(email) = $1`,
+        [value]
       );
     } else {
       result = await req.db.query(
         `SELECT id, account_code, username, first_name, last_name,
                 email, phone, bio, password_hash, created_at
          FROM users
-         WHERE LOWER(username) = $1
-            OR LOWER(email) = $1
-            OR phone = $2`,
-        [value, identifier.trim()]
+         WHERE phone = $1`,
+        [contact]
       );
     }
 
     if (result.rows.length > 1) {
       return res.status(409).json({
         success: false,
-        code: 'ACCOUNT_CODE_REQUIRED',
-        message: 'Plusieurs comptes correspondent. Connectez-vous avec votre code de compte JJM.'
+        message: 'Plusieurs comptes correspondent. Contactez l’assistance.'
       });
     }
 

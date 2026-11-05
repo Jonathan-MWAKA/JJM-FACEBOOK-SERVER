@@ -28,6 +28,12 @@ async function initializeDatabase() {
       CHECK (email IS NOT NULL OR phone IS NOT NULL)
     );
 
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS date_of_birth DATE;
+
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS gender VARCHAR(10);
+
     CREATE TABLE IF NOT EXISTS friendships (
       id BIGSERIAL PRIMARY KEY,
       requester_id BIGINT NOT NULL REFERENCES users(id)
