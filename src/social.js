@@ -132,14 +132,23 @@ async function notifier(db, utilisateur, acteur, type, reference) {
             actor_id: acteur
         });
 
-        await envoyerNotificationUtilisateur(db, utilisateur, {
-            type,
-            title: type === 'message' ? 'Nouveau message' : 'JJM FACEBOOK',
-            body: type === 'message'
-                ? 'Tu as reçu un nouveau message.'
-                : 'Tu as une nouvelle notification.',
-            actor_id: acteur,
-            reference_id: reference || null
+        // L'envoi Firebase ne doit pas retarder la réponse HTTP.
+        // La notification est déjà enregistrée et diffusée par Socket.IO.
+        setImmediate(() => {
+            envoyerNotificationUtilisateur(db, utilisateur, {
+                type,
+                title: type === 'message' ? 'Nouveau message' : 'JJM FACEBOOK',
+                body: type === 'message'
+                    ? 'Tu as reçu un nouveau message.'
+                    : 'Tu as une nouvelle notification.',
+                actor_id: acteur,
+                reference_id: reference || null
+            }).catch(erreur => {
+                console.error(
+                    'Échec de l’envoi Firebase :',
+                    erreur.message
+                );
+            });
         });
     } catch (erreur) {
         console.error(
