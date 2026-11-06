@@ -223,6 +223,74 @@ function identifiantValide(valeur) {
 const visibiliteValide = valeur =>
   ['public', 'friends', 'private'].includes(valeur);
 
+
+// Publications d'un membre : seules les publications autorisées sont retournées.
+router.get('/user/:userId', databaseRequired, authenticate, async (req, res, next) => {
+  const cible = req.params.userId;
+
+  if (!identifiantValide(cible)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Identifiant utilisateur invalide.'
+    });
+  }
+
+  try {
+    const result = await req.db.query(`
+      SELECT
+        p.id, p.user_id, p.content, p.media_url, p.visibility,
+        p.created_at, p.updated_at,
+        u.username, u.first_name, u.last_name, u.profile_picture,
+        (
+          SELECT COUNT(*)::int
+          FROM reactions r
+          WHERE r.post_id = p.id AND r.reaction_type = 'like'
+        ) AS likes_count,
+        (
+          SELECT COUNT(*)::int
+          FROM comments c
+          WHERE c.post_id = p.id
+        ) AS comments_count,
+        EXISTS (
+          SELECT 1
+          FROM reactions r
+          WHERE r.post_id = p.id
+            AND r.user_id = $2
+            AND r.reaction_type = 'like'
+        ) AS liked_by_me
+      FROM posts p
+      JOIN users u ON u.id = p.user_id
+      WHERE p.user_id = $1
+        AND (
+          p.visibility = 'public'
+          OR p.user_id = $2
+          OR (
+            p.visibility = 'friends'
+            AND EXISTS (
+              SELECT 1
+              FROM friendships f
+              WHERE f.status = 'accepted'
+                AND (
+                  (f.requester_id = p.user_id AND f.receiver_id = $2)
+                  OR
+                  (f.requester_id = $2 AND f.receiver_id = p.user_id)
+                )
+            )
+          )
+        )
+      ORDER BY p.created_at DESC, p.id DESC
+      LIMIT 50
+    `, [cible, req.auth.sub]);
+
+    return res.json({
+      success: true,
+      posts: result.rows
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Fil d'actualité : public, publications personnelles et amis acceptés.
 router.get('/', databaseRequired, authenticateOptional, async (req, res, next) => {
   try {
