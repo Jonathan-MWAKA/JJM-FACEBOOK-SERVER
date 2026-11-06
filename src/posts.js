@@ -291,6 +291,73 @@ router.get('/user/:userId', databaseRequired, authenticate, async (req, res, nex
   }
 });
 
+
+// Fil vidéo : vidéos autorisées de tous les membres.
+router.get('/videos', databaseRequired, authenticateOptional, async (req, res, next) => {
+  try {
+    const utilisateurId = req.auth?.sub || null;
+
+    const result = await req.db.query(`
+      SELECT
+        p.id, p.user_id, p.content, p.media_url, p.visibility,
+        p.created_at, p.updated_at,
+        u.username, u.first_name, u.last_name, u.profile_picture,
+        (
+          SELECT COUNT(*)::int
+          FROM reactions r
+          WHERE r.post_id = p.id AND r.reaction_type = 'like'
+        ) AS likes_count,
+        (
+          SELECT COUNT(*)::int
+          FROM comments c
+          WHERE c.post_id = p.id
+        ) AS comments_count,
+        EXISTS (
+          SELECT 1
+          FROM reactions r
+          WHERE r.post_id = p.id
+            AND r.user_id = $1
+            AND r.reaction_type = 'like'
+        ) AS liked_by_me
+      FROM posts p
+      JOIN users u ON u.id = p.user_id
+      WHERE
+        p.media_url IS NOT NULL
+        AND (
+          LOWER(p.media_url) LIKE '%/video/upload/%'
+          OR p.media_url ~* '\\.(mp4|webm|mov|m4v)(\\?|$)'
+        )
+        AND (
+          p.visibility = 'public'
+          OR p.user_id = $1
+          OR (
+            p.visibility = 'friends'
+            AND $1 IS NOT NULL
+            AND EXISTS (
+              SELECT 1
+              FROM friendships f
+              WHERE f.status = 'accepted'
+                AND (
+                  (f.requester_id = p.user_id AND f.receiver_id = $1)
+                  OR
+                  (f.requester_id = $1 AND f.receiver_id = p.user_id)
+                )
+            )
+          )
+        )
+      ORDER BY p.created_at DESC, p.id DESC
+      LIMIT 100
+    `, [utilisateurId]);
+
+    return res.json({
+      success: true,
+      posts: result.rows
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Fil d'actualité : public, publications personnelles et amis acceptés.
 router.get('/', databaseRequired, authenticateOptional, async (req, res, next) => {
   try {
