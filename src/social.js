@@ -1032,9 +1032,22 @@ router.get('/stories', async (req, res) => {
              FROM stories s
              JOIN users u ON u.id = s.user_id
              WHERE s.created_at > NOW() - INTERVAL '24 hours'
+               AND (
+                    s.user_id = $1
+                    OR EXISTS (
+                        SELECT 1
+                        FROM friendships f
+                        WHERE f.status = 'accepted'
+                          AND (
+                              (f.requester_id = $1 AND f.receiver_id = s.user_id)
+                              OR
+                              (f.requester_id = s.user_id AND f.receiver_id = $1)
+                          )
+                    )
+               )
              ORDER BY s.created_at DESC
              LIMIT 100`,
-            []
+            [req.userId]
         );
 
         res.json({ success: true, stories: resultat.rows });
